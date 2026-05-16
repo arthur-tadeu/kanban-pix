@@ -1,13 +1,20 @@
 const express = require('express');
 const cors = require('cors');
-const { PrismaClient } = require('@prisma/client');
+const admin = require('firebase-admin');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
-const prisma = new PrismaClient();
+// Initialize Firebase Admin
+if (!admin.apps.length) {
+  admin.initializeApp({
+    projectId: 'banco-josue'
+  });
+}
+
+const db = admin.firestore();
 const app = express();
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = 'super-secret-jwt-key-for-dev';
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-jwt-key-for-dev';
 
 app.use(cors());
 app.use(express.json());
@@ -27,37 +34,46 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// Seed Global Categories
+// Seed Global Categories (Helper)
 const seedCategories = async () => {
-  const count = await prisma.category.count();
-  if (count === 0) {
-    await prisma.category.createMany({
-      data: [
-        { name: 'Trabalho', color: '#EF4444' }, // Red
-        { name: 'Estudos', color: '#3B82F6' }, // Blue
-        { name: 'Pessoal', color: '#10B981' }, // Green
-        { name: 'Casa', color: '#F59E0B' }     // Amber
-      ]
-    });
+  const categoriesRef = db.collection('categories');
+  const snapshot = await categoriesRef.get();
+  if (snapshot.empty) {
+    const categories = [
+      { name: 'Trabalho', color: '#EF4444' },
+      { name: 'Estudos', color: '#3B82F6' },
+      { name: 'Pessoal', color: '#10B981' },
+      { name: 'Casa', color: '#F59E0B' }
+    ];
+    for (const cat of categories) {
+      await categoriesRef.add(cat);
+    }
   }
 };
-seedCategories();
+seedCategories().catch(console.error);
 
 // Auth Routes
 app.post('/api/auth/register', async (req, res) => {
   const { name, email, password, avatarUrl } = req.body;
   try {
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) return res.status(400).json({ error: 'Email já cadastrado' });
+    const userRef = db.collection('users').where('email', '==', email);
+    const existing = await userRef.get();
+    if (!existing.empty) return res.status(400).json({ error: 'Email já cadastrado' });
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = await prisma.user.create({
-      data: { name, email, password: passwordHash, avatarUrl }
-    });
-
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
+    const newUser = {
+      name,
+      email,
+      password: passwordHash,
+      avatarUrl,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    const docRef = await db.collection('users').add(newUser);
+    
+    const token = jwt.sign({ userId: docRef.id }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: docRef.id, name, email, avatarUrl } });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Erro ao registrar' });
   }
 });
@@ -65,14 +81,18 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(400).json({ error: 'Credenciais inválidas' });
+    const userRef = db.collection('users').where('email', '==', email);
+    const snapshot = await userRef.get();
+    if (snapshot.empty) return res.status(400).json({ error: 'Credenciais inválidas' });
+
+    const userDoc = snapshot.docs[0];
+    const user = userDoc.data();
 
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Credenciais inválidas' });
 
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
+    const token = jwt.sign({ userId: userDoc.id }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: userDoc.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao fazer login' });
   }
@@ -80,8 +100,10 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
-    const user = await prisma.user.findUnique({ where: { id: req.userId } });
-    res.json({ id: user.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl });
+    const userDoc = await db.collection('users').doc(req.userId).get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'Usuário não encontrado' });
+    const user = userDoc.data();
+    res.json({ id: userDoc.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar usuário' });
   }
@@ -90,25 +112,37 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
 // Dashboard Metrics
 app.get('/api/dashboard', authMiddleware, async (req, res) => {
   try {
-    const totalTasks = await prisma.task.count({ where: { userId: req.userId } });
+    const tasksRef = db.collection('tasks').where('userId', '==', req.userId);
+    const allTasksSnapshot = await tasksRef.get();
+    const totalTasks = allTasksSnapshot.size;
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const completedToday = await prisma.task.count({
-      where: { userId: req.userId, status: 'DONE', updatedAt: { gte: today } }
-    });
+    const completedTodaySnapshot = await db.collection('tasks')
+      .where('userId', '==', req.userId)
+      .where('status', '==', 'DONE')
+      .where('updatedAt', '>=', admin.firestore.Timestamp.fromDate(today))
+      .get();
+    const completedToday = completedTodaySnapshot.size;
 
-    const overdueTasks = await prisma.task.count({
-      where: { userId: req.userId, status: { in: ['TODO', 'DOING'] }, dueDate: { lt: new Date() } }
-    });
+    const overdueSnapshot = await db.collection('tasks')
+      .where('userId', '==', req.userId)
+      .where('status', 'in', ['TODO', 'DOING'])
+      .where('dueDate', '<', admin.firestore.Timestamp.now())
+      .get();
+    const overdueTasks = overdueSnapshot.size;
 
     // Upcoming Tasks (Next 5)
-    const upcomingTasks = await prisma.task.findMany({
-      where: { userId: req.userId, status: { in: ['TODO', 'DOING'] }, dueDate: { gte: new Date() } },
-      include: { category: true },
-      orderBy: { dueDate: 'asc' },
-      take: 5
-    });
+    const upcomingSnapshot = await db.collection('tasks')
+      .where('userId', '==', req.userId)
+      .where('status', 'in', ['TODO', 'DOING'])
+      .where('dueDate', '>=', admin.firestore.Timestamp.now())
+      .orderBy('dueDate', 'asc')
+      .limit(5)
+      .get();
+    
+    const upcomingTasks = upcomingSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
     // Last 7 Days Metrics
     const last7Days = [];
@@ -120,17 +154,16 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
       const nextDate = new Date(date);
       nextDate.setDate(date.getDate() + 1);
 
-      const count = await prisma.task.count({
-        where: {
-          userId: req.userId,
-          status: 'DONE',
-          updatedAt: { gte: date, lt: nextDate }
-        }
-      });
+      const countSnapshot = await db.collection('tasks')
+        .where('userId', '==', req.userId)
+        .where('status', '==', 'DONE')
+        .where('updatedAt', '>=', admin.firestore.Timestamp.fromDate(date))
+        .where('updatedAt', '<', admin.firestore.Timestamp.fromDate(nextDate))
+        .get();
 
       last7Days.push({
         date: date.toISOString(),
-        count
+        count: countSnapshot.size
       });
     }
 
@@ -150,13 +183,15 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
 // Tasks
 app.get('/api/tasks', authMiddleware, async (req, res) => {
   try {
-    const tasks = await prisma.task.findMany({
-      where: { userId: req.userId },
-      include: { category: true, tags: true },
-      orderBy: { createdAt: 'desc' }
-    });
+    const tasksSnapshot = await db.collection('tasks')
+      .where('userId', '==', req.userId)
+      .orderBy('createdAt', 'desc')
+      .get();
+    
+    const tasks = tasksSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(tasks);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Erro ao buscar tarefas' });
   }
 });
@@ -164,33 +199,21 @@ app.get('/api/tasks', authMiddleware, async (req, res) => {
 app.post('/api/tasks', authMiddleware, async (req, res) => {
   const { title, description, dueDate, priority, status, categoryId, tags } = req.body;
   try {
-    // Handle tags creation
-    const tagConnectOrCreate = [];
-    if (tags && Array.isArray(tags)) {
-      for (const tagName of tags) {
-        tagConnectOrCreate.push({
-          where: { name_userId: { name: tagName, userId: req.userId } },
-          create: { name: tagName, userId: req.userId }
-        });
-      }
-    }
+    const newTask = {
+      title,
+      description,
+      dueDate: dueDate ? admin.firestore.Timestamp.fromDate(new Date(dueDate)) : null,
+      priority: priority || 'MEDIUM',
+      status: status || 'TODO',
+      categoryId,
+      userId: req.userId,
+      tags: tags || [],
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
 
-    const task = await prisma.task.create({
-      data: {
-        title,
-        description,
-        dueDate: dueDate ? new Date(dueDate) : null,
-        priority: priority || 'MEDIUM',
-        status: status || 'PENDING',
-        categoryId,
-        userId: req.userId,
-        tags: {
-          connectOrCreate: tagConnectOrCreate
-        }
-      },
-      include: { category: true, tags: true }
-    });
-    res.json(task);
+    const docRef = await db.collection('tasks').add(newTask);
+    res.json({ id: docRef.id, ...newTask });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Erro ao criar tarefa' });
@@ -201,12 +224,17 @@ app.put('/api/tasks/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
   const { title, description, dueDate, priority, status, categoryId } = req.body;
   try {
-    const task = await prisma.task.update({
-      where: { id, userId: req.userId },
-      data: { title, description, dueDate: dueDate ? new Date(dueDate) : null, priority, status, categoryId },
-      include: { category: true, tags: true }
-    });
-    res.json(task);
+    const updateData = {
+      title,
+      description,
+      dueDate: dueDate ? admin.firestore.Timestamp.fromDate(new Date(dueDate)) : null,
+      priority,
+      status,
+      categoryId,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await db.collection('tasks').doc(id).update(updateData);
+    res.json({ id, ...updateData });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao atualizar tarefa' });
   }
@@ -215,7 +243,7 @@ app.put('/api/tasks/:id', authMiddleware, async (req, res) => {
 app.delete('/api/tasks/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
   try {
-    await prisma.task.delete({ where: { id, userId: req.userId } });
+    await db.collection('tasks').doc(id).delete();
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao deletar tarefa' });
@@ -224,16 +252,31 @@ app.delete('/api/tasks/:id', authMiddleware, async (req, res) => {
 
 // Categories
 app.get('/api/categories', authMiddleware, async (req, res) => {
-  const categories = await prisma.category.findMany();
-  res.json(categories);
+  try {
+    const snapshot = await db.collection('categories').get();
+    const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(categories);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar categorias' });
+  }
 });
 
 // User's Tags
 app.get('/api/tags', authMiddleware, async (req, res) => {
-  const tags = await prisma.tag.findMany({ where: { userId: req.userId } });
-  res.json(tags);
+  try {
+    const snapshot = await db.collection('tags').where('userId', '==', req.userId).get();
+    const tags = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(tags);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar tags' });
+  }
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend rodando na porta ${PORT}`);
-});
+// Export for Vercel
+module.exports = app;
+
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Backend rodando na porta ${PORT}`);
+  });
+}
