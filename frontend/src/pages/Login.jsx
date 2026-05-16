@@ -92,7 +92,19 @@ export default function Login() {
             try {
               await loginWithGoogle();
             } catch (err) {
-              setError('Erro ao autenticar com Google');
+              console.error("Erro detalhado do Google Login:", err);
+              let msg = 'Erro ao autenticar com Google';
+              if (err.code) {
+                // Erro do Firebase
+                msg = `Erro Firebase (${err.code}): ${err.message}`;
+              } else if (err.response) {
+                // Erro do Backend
+                msg = err.response.data?.details || err.response.data?.error || `Erro Backend (${err.response.status})`;
+              } else if (err.request) {
+                // Erro de rede
+                msg = 'Não foi possível conectar ao servidor. Verifique se o backend está rodando.';
+              }
+              setError(msg);
             }
           }}
           className="w-full py-2.5 flex items-center justify-center gap-2 border border-border bg-card text-card-foreground rounded-md hover:bg-muted/50 transition-colors"

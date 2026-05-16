@@ -3,12 +3,30 @@ const cors = require('cors');
 const admin = require('firebase-admin');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+require('dotenv').config({ path: '../.env' });
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
-  admin.initializeApp({
-    projectId: 'banco-josue'
-  });
+  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+  
+  if (serviceAccount) {
+    try {
+      const cert = JSON.parse(serviceAccount);
+      admin.initializeApp({
+        credential: admin.credential.cert(cert),
+        projectId: cert.project_id || 'banco-josue'
+      });
+      console.log("Firebase Admin inicializado com Service Account.");
+    } catch (e) {
+      console.error("Erro ao fazer parse da FIREBASE_SERVICE_ACCOUNT:", e.message);
+      admin.initializeApp({ projectId: 'banco-josue' });
+    }
+  } else {
+    admin.initializeApp({
+      projectId: 'banco-josue'
+    });
+    console.log("Firebase Admin inicializado apenas com ProjectId (usando ADC).");
+  }
 }
 
 const db = admin.firestore();
@@ -114,8 +132,11 @@ app.post('/api/auth/google', async (req, res) => {
     const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: userData });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Erro no login com Google' });
+    console.error("Erro no processamento do login Google:", error);
+    res.status(500).json({ 
+      error: 'Erro no login com Google', 
+      details: error.message 
+    });
   }
 });
 

@@ -3,13 +3,18 @@ import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDTDrcY84QOzSl13DudemqX0AcR1GKm760",
-  authDomain: "banco-josue.firebaseapp.com",
-  projectId: "banco-josue",
-  storageBucket: "banco-josue.firebasestorage.app",
-  messagingSenderId: "717980553376",
-  appId: "1:717980553376:web:af879ed7e7c7988214b9c5"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
+
+// Check if config is loaded (Vite env variables)
+if (!firebaseConfig.apiKey) {
+  console.error("ERRO: Configurações do Firebase não encontradas no ambiente (Vite). Verifique o arquivo .env e a configuração envDir.");
+}
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
