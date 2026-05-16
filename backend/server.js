@@ -78,6 +78,47 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
+app.post('/api/auth/google', async (req, res) => {
+  const { name, email, avatarUrl, googleUid } = req.body;
+  try {
+    const userRef = db.collection('users').where('email', '==', email);
+    const snapshot = await userRef.get();
+    
+    let userId;
+    let userData;
+
+    if (snapshot.empty) {
+      // Create new user if doesn't exist
+      const newUser = {
+        name,
+        email,
+        avatarUrl,
+        googleUid,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      const docRef = await db.collection('users').add(newUser);
+      userId = docRef.id;
+      userData = { id: userId, name, email, avatarUrl };
+    } else {
+      // User exists, update if needed or just get the ID
+      const userDoc = snapshot.docs[0];
+      userId = userDoc.id;
+      userData = { id: userId, ...userDoc.data() };
+      
+      // Update googleUid if missing
+      if (!userData.googleUid) {
+        await db.collection('users').doc(userId).update({ googleUid });
+      }
+    }
+
+    const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: userData });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Erro no login com Google' });
+  }
+});
+
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
